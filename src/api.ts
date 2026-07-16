@@ -11,14 +11,66 @@ import {
 	SOURCES,
 	AUTOTRANSITION_EFF,
 	KEYS,
+	TALLY_CODES,
+	TallySize,
 } from './constants.js'
 
 //import { CheckVariables } from './variables.js'
 import { INCOMING_HANDLE } from './validators/index.js'
 
+export function stopConnection(self: xvsInstance): void {
+	self.log('debug', 'stopConnection')
+
+	if (self.reconnectInterval) {
+		clearInterval(self.reconnectInterval)
+		self.reconnectInterval = undefined
+	}
+
+	if (self.outputTimer) {
+		clearInterval(self.outputTimer)
+		self.outputTimer = undefined
+	}
+
+	if (self.xptInterval) {
+		clearTimeout(self.xptInterval)
+		self.xptInterval = undefined
+	}
+
+	if (self.sourceNameUpdateTimer) {
+		clearTimeout(self.sourceNameUpdateTimer)
+		self.sourceNameUpdateTimer = undefined
+	}
+
+	if (self.gpioUpdateTimer) {
+		clearTimeout(self.gpioUpdateTimer)
+		self.gpioUpdateTimer = undefined
+	}
+
+	// Cancel any pending source name re-read timers and clear write guards
+	for (const timer of self.sourceNameRereadTimers.values()) {
+		clearTimeout(timer)
+	}
+	self.sourceNameRereadTimers.clear()
+	self.pendingSourceNameWrites.clear()
+
+	if (self.tcp !== undefined) {
+		self.tcp.destroy()
+		self.tcp = undefined
+	}
+
+	self.PROTOCOL_STATE = 'IDLE'
+	self.wasConnected = false
+	self.incomingData = Buffer.alloc(0)
+	self.incomingCommandQueue = []
+	self.outgoingCommandQueue = []
+}
+
 export function initConnection(self: xvsInstance): void {
 	//create socket connection
 	self.log('debug', 'initConnection')
+
+	//make sure any previous connection/timers are torn down before we open a new one
+	stopConnection(self)
 
 	//check the config for the interval rate and update the global variable
 	if (self.config.intervalRate) {
@@ -41,6 +93,7 @@ export function initConnection(self: xvsInstance): void {
 			self.DATA = {
 				sourceNames: [],
 				xpt: [],
+				tally: {},
 			}
 
 			// tell the module we are connected, and waiting for ack
@@ -54,12 +107,13 @@ export function initConnection(self: xvsInstance): void {
 			self.incomingData = Buffer.concat([self.incomingData, data])
 
 			// check if we have a complete command
-			if (self.incomingData.readUInt8(0) === 0x84) {
-				console.log('got ACK')
+			if (self.incomingData.length > 0 && self.incomingData.readUInt8(0) === 0x84) {
+				self.logVerbose('got ACK')
 				// this is an ACK, we can ignore it
 				self.incomingData = self.incomingData.subarray(1)
 				self.updateStatus(InstanceStatus.Ok)
-				self.log('debug', 'ACK received, connected.')
+				self.wasConnected = true
+				self.logVerbose('ACK received, connected.')
 
 				if (self.PROTOCOL_STATE === 'WAITING') {
 					readStates(self)
@@ -75,7 +129,7 @@ export function initConnection(self: xvsInstance): void {
 			if (self.PROTOCOL_STATE === 'OK') {
 				while (self.incomingData.length > 0) {
 					const commandLength = self.incomingData.readUInt8(0)
-					if (self.incomingData.length >= commandLength) {
+					if (self.incomingData.length >= commandLength + 1) {
 						const command = self.incomingData.subarray(0, commandLength + 1)
 						self.incomingData = self.incomingData.subarray(commandLength + 1)
 						self.incomingCommandQueue.push(command)
@@ -99,18 +153,25 @@ export function initConnection(self: xvsInstance): void {
 			self.PROTOCOL_STATE = 'IDLE'
 			self.updateStatus(InstanceStatus.UnknownError, 'Connection error')
 
-			//if econnrefused, start a reeconnect interval
+			//if econnrefused, schedule a single reconnect attempt
 			if (String(err).indexOf('ECONNREFUSED') > -1) {
-				//disconnect tcp
-				self.tcp.destroy()
-				self.tcp = undefined
-				self.log('info', 'Connection refused. Will attempt to reconnect in 30 seconds.')
+				//only notify when we drop from a previously connected state, so we don't
+				//spam this message on every failed reconnect attempt
+				if (self.wasConnected) {
+					self.log('info', 'Connection refused. Will attempt to reconnect in 30 seconds.')
+				}
+				self.wasConnected = false
 
-				//start reconnect
-				self.reconnectInterval = setInterval(() => {
+				//clear any pending reconnect before scheduling a new one
+				if (self.reconnectInterval) {
+					clearTimeout(self.reconnectInterval)
+				}
+
+				//initConnection() tears down the existing socket/timers before reconnecting
+				self.reconnectInterval = setTimeout(() => {
+					self.reconnectInterval = undefined
 					self.log('info', 'Attempting to reconnect...')
 					initConnection(self)
-					self.reconnectInterval = undefined
 				}, 30000)
 			}
 		})
@@ -151,17 +212,10 @@ export function readStates(self: xvsInstance): void {
 	}
 
 	//read source name setup
-	const bufferSource = Buffer.alloc(6)
+	readSourceNames(self)
 
-	for (const source of SOURCES[self.config.model]) {
-		bufferSource.writeUInt8(0x05, 0) //2 bytes is the length of the command
-		bufferSource.writeUInt8(0x20, 1)
-		bufferSource.writeUInt8(0x70, 2)
-		bufferSource.writeUInt8(0x50, 3)
-		bufferSource.writeUInt8(source.byte1, 4)
-		bufferSource.writeUInt8(source.byte2, 5)
-		sendCommand(self, bufferSource, false)
-	}
+	//read current tally state for the configured data size
+	readTally(self)
 
 	//enable virtual GPI In/Out interface
 	const bufferGPI = Buffer.alloc(4)
@@ -176,8 +230,113 @@ function processData(self: xvsInstance, data: Buffer): void {
 	INCOMING_HANDLE(self, data)
 }
 
+export function readSourceName(self: xvsInstance, source: Source): void {
+	//request the source name for a single source
+	const buffer = Buffer.alloc(6)
+	buffer.writeUInt8(0x05, 0) //5 bytes follow the count
+	buffer.writeUInt8(0x20, 1)
+	buffer.writeUInt8(0x70, 2)
+	buffer.writeUInt8(0x50, 3)
+	buffer.writeUInt8(source.byte1, 4) //source number byte 1
+	buffer.writeUInt8(source.byte2, 5) //source number byte 2
+	sendCommand(self, buffer, false)
+}
+
+export function readSourceNames(self: xvsInstance): void {
+	//request the source names for every source on the current model
+	for (const source of SOURCES[self.config.model]) {
+		readSourceName(self, source)
+	}
+}
+
+export function setSourceName(self: xvsInstance, sourceId: string, name: string): void {
+	self.logVerbose(`setSourceName: ${sourceId}, ${name}`)
+
+	//look up the source address
+	const source: Source | undefined = SOURCES[self.config.model].find((x) => x.id === parseInt(sourceId))
+
+	if (!source) {
+		self.log('error', `setSourceName: No source found for ${sourceId}`)
+		return
+	}
+
+	//source name is ASCII, max 16 characters (§12-4 Source Name Setup, Write)
+	const truncatedName = name.substring(0, 16)
+	const nameBuffer = Buffer.from(truncatedName, 'ascii')
+	const nameLength = nameBuffer.length
+
+	const buffer = Buffer.alloc(6 + nameLength)
+	buffer.writeUInt8(nameLength + 5, 0) //byte count = name length + 5
+	buffer.writeUInt8(0x20, 1)
+	buffer.writeUInt8(0xf0, 2) //write command code
+	buffer.writeUInt8(0x50, 3)
+	buffer.writeUInt8(source.byte1, 4) //source number byte 1
+	buffer.writeUInt8(source.byte2, 5) //source number byte 2
+	nameBuffer.copy(buffer, 6) //source name bytes
+
+	// Guard against stale read responses overwriting the local cache
+	const REREAD_DELAY = 5000
+	const GUARD_DURATION = REREAD_DELAY + 2000
+	self.pendingSourceNameWrites.set(source.id, {
+		name: truncatedName,
+		expiresAt: Date.now() + GUARD_DURATION,
+	})
+
+	sendCommand(self, buffer)
+
+	// Update local cache immediately so variables and dropdowns update without lag
+	const foundSource = self.DATA.sourceNames.find((obj: { id: number }) => obj.id === source.id)
+	if (!foundSource) {
+		self.DATA.sourceNames.push({ id: source.id, name: truncatedName })
+	} else {
+		foundSource.name = truncatedName
+	}
+	self.updateActions()
+	self.updateFeedbacks()
+	self.updatePresets()
+	self.updateVariableValues()
+
+	// Re-read just this source after the write is fully committed
+	const existingTimer = self.sourceNameRereadTimers.get(source.id)
+	if (existingTimer) {
+		clearTimeout(existingTimer)
+	}
+	self.sourceNameRereadTimers.set(
+		source.id,
+		setTimeout(() => {
+			self.sourceNameRereadTimers.delete(source.id)
+			// Clear the guard just before re-reading so the response is accepted
+			self.pendingSourceNameWrites.delete(source.id)
+			readSourceName(self, source)
+		}, REREAD_DELAY),
+	)
+}
+
+export function readTally(self: xvsInstance): void {
+	//tally disabled - don't request anything
+	if (self.config.tallyDataSize !== '128' && self.config.tallyDataSize !== '256') {
+		return
+	}
+
+	//request the current tally state for every group/color of the configured data size
+	//(§13 Serial Tally, Read: 03 24 <readCode> FF). Live updates are pushed without a read.
+	const size: TallySize = self.config.tallyDataSize === '256' ? 256 : 128
+
+	for (const code of Object.values(TALLY_CODES)) {
+		if (code.size !== size) {
+			continue
+		}
+		const buffer = Buffer.alloc(4)
+		buffer.writeUInt8(0x03, 0) //3 bytes follow the count
+		buffer.writeUInt8(0x24, 1) //tally effect address
+		buffer.writeUInt8(code.readCode, 2) //read command code for this group/color
+		buffer.writeUInt8(0xff, 3)
+		sendCommand(self, buffer, false)
+	}
+}
+
 export function xptME(self: xvsInstance, effId: string, busId: string, sourceId: string): void {
-	console.log(`xptME: ${effId}, ${busId}, ${sourceId}`)
+	self.logVerbose(`xptME: ${effId}, ${busId}, ${sourceId}`)
 	const buffer = Buffer.alloc(5)
 
 	//look up the effect, bus, and source addresses
@@ -201,7 +360,7 @@ export function xptME(self: xvsInstance, effId: string, busId: string, sourceId:
 }
 
 export function copyME(self: xvsInstance, effId: string, copyEffId: string, busId: string): void {
-	console.log(`copyME: FROM ${effId}, TO ${copyEffId}, BUS ${busId}`)
+	self.logVerbose(`copyME: FROM ${effId}, TO ${copyEffId}, BUS ${busId}`)
 
 	//figure out what the source is on the eff, and then send that source to the copyEff
 	const sourceId: number = self.DATA.xpt[effId]
@@ -212,7 +371,7 @@ export function copyME(self: xvsInstance, effId: string, copyEffId: string, busI
 }
 
 export function xptAUX(self: xvsInstance, auxId: string, sourceId: string): void {
-	self.log('debug', `xptAUX: ${auxId}, ${sourceId}`)
+	self.logVerbose(`xptAUX: ${auxId}, ${sourceId}`)
 	const buffer = Buffer.alloc(5)
 
 	//look up the aux and source addresses
@@ -234,7 +393,7 @@ export function xptAUX(self: xvsInstance, auxId: string, sourceId: string): void
 }
 
 export function copyAUX(self: xvsInstance, auxId: string, copyAuxId: string): void {
-	self.log('debug', `copyAUX: FROM ${auxId}, TO ${copyAuxId}`)
+	self.logVerbose(`copyAUX: FROM ${auxId}, TO ${copyAuxId}`)
 
 	//figure out what the source is on the aux, and then send that source to the copyAux
 	const sourceId: number = self.DATA.xpt[auxId]
@@ -245,7 +404,7 @@ export function copyAUX(self: xvsInstance, auxId: string, copyAuxId: string): vo
 }
 
 export function transitionME(self: xvsInstance, effId: string, cmdId: string, transRate: number): void {
-	self.log('debug', `transitionME: ${effId}, ${cmdId}`)
+	self.logVerbose(`transitionME: ${effId}, ${cmdId}`)
 	const buffer = Buffer.alloc(7)
 
 	//look up the effect address
@@ -274,7 +433,7 @@ export function transitionME(self: xvsInstance, effId: string, cmdId: string, tr
 }
 
 export function transitionMECancel(self: xvsInstance, effId: string, cmdId: string): void {
-	self.log('debug', `transitionMECancel: ${effId}, ${cmdId}`)
+	self.logVerbose(`transitionMECancel: ${effId}, ${cmdId}`)
 	const buffer = Buffer.alloc(5)
 
 	//look up the effect address
@@ -297,7 +456,7 @@ export function transitionMECancel(self: xvsInstance, effId: string, cmdId: stri
 }
 
 export function keyOnOff(self: xvsInstance, effId: string, keyId: string, cmd: string): void {
-	self.log('debug', `keyOnOff: ${effId}, ${keyId} ${cmd}`)
+	self.logVerbose(`keyOnOff: ${effId}, ${keyId} ${cmd}`)
 	const buffer = Buffer.alloc(4)
 
 	//look up the effect address
@@ -327,11 +486,10 @@ export function recallSnapshot(
 	regionSelectPart1: string[],
 	registerNumber: number,
 	regionSelectPart2: number[],
-	regionselectPart3: string[]
+	regionselectPart3: string[],
 ): void {
-	self.log(
-		'debug',
-		`recallSnapshot: ${regionSelectPart1}, ${registerNumber}, ${regionSelectPart2}, ${regionselectPart3}`
+	self.logVerbose(
+		`recallSnapshot: ${regionSelectPart1}, ${registerNumber}, ${regionSelectPart2}, ${regionselectPart3}`,
 	)
 	const buffer = Buffer.alloc(7)
 
@@ -392,7 +550,7 @@ export function recallSnapshot(
 }
 
 export function macroRecall(self: xvsInstance, macroNumber: string): void {
-	self.log('debug', `macroRecall: ${macroNumber}`)
+	self.logVerbose(`macroRecall: ${macroNumber}`)
 	const buffer = Buffer.alloc(7)
 
 	let macroNumberByte1 = 0
@@ -414,7 +572,7 @@ export function macroRecall(self: xvsInstance, macroNumber: string): void {
 }
 
 export function macroTake(self: xvsInstance): void {
-	self.log('debug', `macroTake`)
+	self.logVerbose(`macroTake`)
 	const buffer = Buffer.alloc(5)
 
 	buffer.writeUInt8(0x04, 0) //4 bytes is the length of the command
@@ -426,7 +584,7 @@ export function macroTake(self: xvsInstance): void {
 }
 
 export function gpiIn(self: xvsInstance, gpiNumber: number, state: number): void {
-	self.log('debug', `activate gpiIn: ${gpiNumber}, ${state}`)
+	self.logVerbose(`activate gpiIn: ${gpiNumber}, ${state}`)
 	const buffer = Buffer.alloc(5)
 
 	buffer.writeUInt8(0x04, 0) //4 bytes is the length of the command
@@ -438,7 +596,7 @@ export function gpiIn(self: xvsInstance, gpiNumber: number, state: number): void
 }
 
 export function gpiOut(self: xvsInstance, gpiNumber: number, state: number): void {
-	self.log('debug', `activate gpiOut: ${gpiNumber}, ${state}`)
+	self.logVerbose(`activate gpiOut: ${gpiNumber}, ${state}`)
 	const buffer = Buffer.alloc(5)
 
 	buffer.writeUInt8(0x04, 0) //4 bytes is the length of the command
@@ -450,7 +608,7 @@ export function gpiOut(self: xvsInstance, gpiNumber: number, state: number): voi
 }
 
 export function customCommand(self: xvsInstance, command: string): void {
-	self.log('debug', `customCommand: ${command}`)
+	self.logVerbose(`customCommand: ${command}`)
 	const buffer = Buffer.from(command, 'hex')
 	sendCommand(self, buffer)
 }

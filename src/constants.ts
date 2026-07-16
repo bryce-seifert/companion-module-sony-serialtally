@@ -452,12 +452,12 @@ export const SOURCES_XVS9000: Source[] = [
 	{ id: 210, label: 'CCR4', byte1: 0x00, byte2: 0xd2 },
 	{ id: 211, label: 'DME MONV', byte1: 0x00, byte2: 0xd3 },
 	{ id: 212, label: 'DME MONK', byte1: 0x00, byte2: 0xd4 },
-	{ id: 215, label: 'ME1 Out 1', byte1: 0x00, byte2: 0xd7 },
-	{ id: 216, label: 'ME1 Out 2', byte1: 0x00, byte2: 0xd8 },
-	{ id: 217, label: 'ME1 Out 3', byte1: 0x00, byte2: 0xd9 },
-	{ id: 218, label: 'ME1 Out 4', byte1: 0x00, byte2: 0xda },
-	{ id: 219, label: 'ME1 Out 5', byte1: 0x00, byte2: 0xdb },
-	{ id: 220, label: 'ME1 Out 6', byte1: 0x00, byte2: 0xdc },
+	{ id: 215, label: 'ME 1 Out 1', byte1: 0x00, byte2: 0xd7 },
+	{ id: 216, label: 'ME 1 Out 2', byte1: 0x00, byte2: 0xd8 },
+	{ id: 217, label: 'ME 1 Out 3', byte1: 0x00, byte2: 0xd9 },
+	{ id: 218, label: 'ME 1 Out 4', byte1: 0x00, byte2: 0xda },
+	{ id: 219, label: 'ME 1 Out 5', byte1: 0x00, byte2: 0xdb },
+	{ id: 220, label: 'ME 1 Out 6', byte1: 0x00, byte2: 0xdc },
 	{ id: 221, label: 'ME 1 Out 7', byte1: 0x00, byte2: 0xdd },
 	{ id: 222, label: 'ME 1 Out 8', byte1: 0x00, byte2: 0xde },
 	{ id: 223, label: 'ME 1 Out 9', byte1: 0x00, byte2: 0xdf },
@@ -632,12 +632,12 @@ export const SOURCES_XVSG1: Source[] = [
 	{ id: 212, label: 'DME MON1 K', byte1: 0x00, byte2: 0xd4 },
 	{ id: 213, label: '(DME MON2 V)', byte1: 0x00, byte2: 0xd5 },
 	{ id: 214, label: '(DME MON2 K)', byte1: 0x00, byte2: 0xd6 },
-	{ id: 215, label: 'ME1 Out 1', byte1: 0x00, byte2: 0xd7 },
-	{ id: 216, label: 'ME1 Out 2', byte1: 0x00, byte2: 0xd8 },
-	{ id: 217, label: 'ME1 Out 3', byte1: 0x00, byte2: 0xd9 },
-	{ id: 218, label: 'ME1 Out 4', byte1: 0x00, byte2: 0xda },
-	{ id: 219, label: 'ME1 Out 5', byte1: 0x00, byte2: 0xdb },
-	{ id: 220, label: 'ME1 Out 6', byte1: 0x00, byte2: 0xdc },
+	{ id: 215, label: 'ME 1 Out 1', byte1: 0x00, byte2: 0xd7 },
+	{ id: 216, label: 'ME 1 Out 2', byte1: 0x00, byte2: 0xd8 },
+	{ id: 217, label: 'ME 1 Out 3', byte1: 0x00, byte2: 0xd9 },
+	{ id: 218, label: 'ME 1 Out 4', byte1: 0x00, byte2: 0xda },
+	{ id: 219, label: 'ME 1 Out 5', byte1: 0x00, byte2: 0xdb },
+	{ id: 220, label: 'ME 1 Out 6', byte1: 0x00, byte2: 0xdc },
 	{ id: 221, label: 'ME 1 Out 7', byte1: 0x00, byte2: 0xdd },
 	{ id: 222, label: 'ME 1 Out 8', byte1: 0x00, byte2: 0xde },
 	{ id: 231, label: 'ME 2 Out 1', byte1: 0x00, byte2: 0xe7 },
@@ -968,3 +968,74 @@ export const GPO: GPIO[] = [
 	{ id: 'gpo7', label: 'GPO 7', readByte: 0x07 },
 	{ id: 'gpo8', label: 'GPO 8', readByte: 0x08 },
 ]
+
+// --- Serial Tally (protocol §13) ---------------------------------------------
+
+export type TallyColor = 'red' | 'green' | 'yellow'
+export type TallySize = 128 | 256
+
+export interface TallyGroup {
+	id: string
+	label: string
+}
+
+export interface TallyColorChoice {
+	id: TallyColor
+	label: string
+}
+
+// The switcher exposes 8 tally groups (GP1-GP8), each with a Red, Green and Yellow tally.
+export const TALLY_GROUPS: TallyGroup[] = [
+	{ id: 'gp1', label: 'GP1' },
+	{ id: 'gp2', label: 'GP2' },
+	{ id: 'gp3', label: 'GP3' },
+	{ id: 'gp4', label: 'GP4' },
+	{ id: 'gp5', label: 'GP5' },
+	{ id: 'gp6', label: 'GP6' },
+	{ id: 'gp7', label: 'GP7' },
+	{ id: 'gp8', label: 'GP8' },
+]
+
+export const TALLY_COLORS: TallyColorChoice[] = [
+	{ id: 'red', label: 'Red' },
+	{ id: 'green', label: 'Green' },
+	{ id: 'yellow', label: 'Yellow' },
+]
+
+export interface TallyCode {
+	group: string // gp1..gp8
+	color: TallyColor
+	size: TallySize
+	readCode: number // corresponding READ command code (pushCode - 0x80)
+}
+
+// Build the lookup from a pushed command code to its (group, color, size).
+// 128-bit: pushed 0x91..0xA8, 256-bit: pushed 0xD1..0xE8.
+// Within each: 0xn1..0xn0 = GPn Red/Green interleaved, +0x10 = GPn Yellow.
+// The READ command code is always the pushed code minus 0x80.
+function buildTallyCodes(): Record<number, TallyCode> {
+	const codes: Record<number, TallyCode> = {}
+	const bases: { base: number; size: TallySize }[] = [
+		{ base: 0x91, size: 128 },
+		{ base: 0xd1, size: 256 },
+	]
+	for (const { base, size } of bases) {
+		for (let n = 0; n < 8; n++) {
+			const group = `gp${n + 1}`
+			const redCode = base + n * 2
+			const greenCode = base + n * 2 + 1
+			const yellowCode = base + 0x10 + n
+			codes[redCode] = { group, color: 'red', size, readCode: redCode - 0x80 }
+			codes[greenCode] = { group, color: 'green', size, readCode: greenCode - 0x80 }
+			codes[yellowCode] = { group, color: 'yellow', size, readCode: yellowCode - 0x80 }
+		}
+	}
+	return codes
+}
+
+export const TALLY_CODES: Record<number, TallyCode> = buildTallyCodes()
+
+// Key used in self.DATA.tally for a (group, color) pair, e.g. 'gp1_red'.
+export function tallyKey(group: string, color: TallyColor): string {
+	return `${group}_${color}`
+}

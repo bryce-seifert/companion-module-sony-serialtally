@@ -24,6 +24,8 @@ import {
 	gpiIn,
 	gpiOut,
 	customCommand,
+	readSourceNames,
+	setSourceName,
 } from './api.js'
 
 export function UpdateActions(self: xvsInstance): void {
@@ -33,7 +35,8 @@ export function UpdateActions(self: xvsInstance): void {
 	const listSOURCES: Source[] = Object.values(SOURCES[self.config.model]).map((source: Source) => {
 		const found = self.DATA.sourceNames.find((obj: { id: number }) => obj.id === source.id)
 		if (found && found.name) {
-			source.label = `${source.label} (${found.name})`
+			//return a copy so we never mutate the shared SOURCES constant's label
+			return { ...source, label: `${source.label} (${found.name})` }
 		}
 		return source
 	})
@@ -409,6 +412,43 @@ export function UpdateActions(self: xvsInstance): void {
 		},
 	}
 
+	actions.setSourceName = {
+		name: 'Set Source Name',
+		options: [
+			{
+				type: 'dropdown',
+				id: 'source',
+				label: 'Source Selection',
+				default: listSOURCES[0].id,
+				choices: listSOURCES,
+			},
+			{
+				type: 'textinput',
+				id: 'name',
+				label: 'Source Name (max 16 characters)',
+				default: '',
+				useVariables: true,
+			},
+		],
+		callback: async (event) => {
+			const source: any = event.options.source
+			if (!event.options.name || typeof event.options.name !== 'string') {
+				self.log('error', 'Source Name is required and must be a string')
+				return
+			}
+			const name: string = event.options.name
+			setSourceName(self, source, name)
+		},
+	}
+
+	actions.refreshSourceNames = {
+		name: 'Refresh Source Names',
+		options: [],
+		callback: async () => {
+			readSourceNames(self)
+		},
+	}
+
 	if (self.config.allowCustomCommands == true) {
 		//send custom command string
 		actions.customCommand = {
@@ -435,7 +475,7 @@ export function UpdateActions(self: xvsInstance): void {
 			],
 			callback: async (event) => {
 				const commandString: any = await self.parseVariablesInString(
-					event.options.commandString?.toString() ?? ''
+					event.options.commandString?.toString() ?? '',
 				)
 				customCommand(self, commandString)
 			},

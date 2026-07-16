@@ -5,6 +5,7 @@ export interface ModuleConfig {
 	host: string
 	port: number
 	model: Models
+	tallyDataSize: 'off' | '128' | '256'
 	advanced: boolean
 	allowCustomCommands: boolean
 	intervalRate: number
@@ -45,6 +46,20 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 			choices: MODELS,
 		},
 		{
+			type: 'dropdown',
+			id: 'tallyDataSize',
+			label: 'Tally Data Size',
+			width: 4,
+			default: 'off',
+			tooltip:
+				"Enables Serial Tally feedback and variables. Must match the switcher's Serial Tally Menu 'Tally Data Size' setting. Used to read current tally state on connect; live tally updates are detected automatically regardless. Leave Off to disable tally entirely.",
+			choices: [
+				{ id: 'off', label: 'Off' },
+				{ id: '128', label: '128-bit (Sources 1-128)' },
+				{ id: '256', label: '256-bit (Sources 1-256)' },
+			],
+		},
+		{
 			type: 'static-text',
 			id: 'advancedSeperator',
 			label: '',
@@ -71,9 +86,9 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 			id: 'intervalRate',
 			label: 'Update Interval Rate (ms)',
 			width: 4,
-			min: 100,
+			min: 10,
 			max: 60000,
-			default: 500,
+			default: 100,
 			isVisible: (options) => !!options['advanced'],
 		},
 		{

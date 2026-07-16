@@ -26,15 +26,11 @@ export function INCOMING_FM_XPT(self: xvsInstance, buffer: Buffer): boolean {
 	const foundSource = SOURCES[self.config.model].find((obj) => obj.byte1 === data1 && obj.byte2 === data2)
 
 	if (!foundSource) {
-		console.log('FMXPT: (NO SOURCE MATCH)', { data1, data2, foundFM, foundSource })
+		self.logVerbose(`FMXPT: (NO SOURCE MATCH) ${JSON.stringify({ data1, data2, foundFM, foundSource })}`)
 		return false
 	}
 
-	// TODO: Handle feedbacks for FM XPT
-	console.log('INCOMING: FMXPT:', foundFM, foundSource)
-
-	//look in the self.DATA.xpt to see if the aux  is already there, if it is, update it, if not, add it.
-	//if the source is already there, update it, if not, add it.
+	self.logVerbose(`INCOMING: FMXPT: ${JSON.stringify(foundFM)} ${JSON.stringify(foundSource)}`)
 
 	if (!self.DATA.xpt[foundFM.id]) {
 		self.DATA.xpt[foundFM.id] = {}
@@ -46,10 +42,9 @@ export function INCOMING_FM_XPT(self: xvsInstance, buffer: Buffer): boolean {
 		clearInterval(self.xptInterval)
 	}
 
-	//update variables and feedbacks
 	self.xptInterval = setTimeout(() => {
 		self.updateVariableValues()
-		self.checkFeedbacks()
+		self.checkFeedbacks('xptMEState', 'xptAUXState', 'xptFMState')
 		clearInterval(self.xptInterval)
 	}, self.INTERVAL_RATE)
 

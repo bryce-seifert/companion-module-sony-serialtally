@@ -31,17 +31,14 @@ export function INCOMING_ME_XPT(self: xvsInstance, buffer: Buffer): boolean {
 	const foundSource = SOURCES[self.config.model].find((obj) => obj.byte1 === data1 && obj.byte2 === data2)
 
 	if (!foundSource) {
-		console.log('INCOMING: MEXPT: (NO SOURCE MATCH)', { foundME, foundBus, foundSource })
+		self.logVerbose(`INCOMING: MEXPT: (NO SOURCE MATCH) ${JSON.stringify({ foundME, foundBus, foundSource })}`)
 		self.log('error', 'INCOMING ME XPT - NO SOURCE MATCH')
 		return false
 	}
 
-	// TODO: handle feedbacks for ME XPT
-	console.log('INCOMING: MEXPT:', foundME, foundBus, foundSource)
-
-	//store the current state of the M/E XPT
-	//look in the self.DATA.xpt to see if the ME's bus is already there, if it is, update it, if not, add it.
-	//if the source is already there, update it, if not, add it.
+	self.logVerbose(
+		`INCOMING: MEXPT: ${JSON.stringify(foundME)} ${JSON.stringify(foundBus)} ${JSON.stringify(foundSource)}`,
+	)
 
 	if (!self.DATA.xpt[foundME.id]) {
 		self.DATA.xpt[foundME.id] = {}
@@ -57,10 +54,9 @@ export function INCOMING_ME_XPT(self: xvsInstance, buffer: Buffer): boolean {
 		clearInterval(self.xptInterval)
 	}
 
-	//update variables and feedbacks
 	self.xptInterval = setTimeout(() => {
 		self.updateVariableValues()
-		self.checkFeedbacks()
+		self.checkFeedbacks('xptMEState', 'xptAUXState', 'xptFMState')
 		clearInterval(self.xptInterval)
 	}, self.INTERVAL_RATE)
 
